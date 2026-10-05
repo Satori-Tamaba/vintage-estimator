@@ -1,12 +1,4 @@
-import  os
-import  zipfile
-import  gdown
 
-url = "https://drive.google.com/file/d/1HSM40tYboRt2zRNa49MCl0psTWvsABOF/view?usp=drive_link"
-archive_name = "antiques_v1.zip"
-destination_folder = "./data"
-print("Загрузка архива")
-gdown.download(url, archive_name)
 
 import os
 import zipfile

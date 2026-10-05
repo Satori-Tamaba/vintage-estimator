@@ -9,12 +9,17 @@ description = "Оценка антиквариата по фото"
 requires-python = ">=3.11"
 dependencies = [
     "beautifulsoup4>=4.15.0",
+    "faiss-cpu>=1.15.1",
     "gdown>=6.4.1",
     "ipykernel>=7.4.0",
     "numpy>=1.26",
+    "open-clip-torch>=3.3.0",
     "pandas>=3.0.6",
     "pillow>=10.0",
     "requests>=2.34.2",
+    "torch>=2.14.1",
+    "torchvision>=0.29.1",
+    "tqdm>=4.70.1",
 ]
 
 [project.optional-dependencies]
