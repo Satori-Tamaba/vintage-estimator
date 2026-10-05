@@ -47,10 +47,30 @@ def test_estimate_endpoint_returns_pipeline_result(monkeypatch):
     assert body["similar_items"][0]["item_id"] == "1"
 
 
-def test_estimate_endpoint_rejects_invalid_file():
+def test_estimate_endpoint_rejects_unsupported_content_type():
     response = client.post(
         "/estimate",
         files={"file": ("not_an_image.txt", b"hello", "text/plain")},
     )
 
+    assert response.status_code == 415
+
+
+def test_estimate_endpoint_rejects_corrupted_image():
+    response = client.post(
+        "/estimate",
+        files={"file": ("broken.png", b"not actually a png", "image/png")},
+    )
+
     assert response.status_code == 400
+
+
+def test_estimate_endpoint_rejects_too_large_file():
+    oversized = b"0" * (10 * 1024 * 1024 + 1)
+
+    response = client.post(
+        "/estimate",
+        files={"file": ("huge.png", oversized, "image/png")},
+    )
+
+    assert response.status_code == 413
