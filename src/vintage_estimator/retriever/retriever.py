@@ -1,3 +1,4 @@
+from vintage_estimator.retriever.index import search
 from vintage_estimator.schemas import Embedding, RetrievedItem
 
 
@@ -7,4 +8,4 @@ def retrieve(embedding: Embedding, top_k: int = 5) -> list[RetrievedItem]:
     Результат идёт в price_prediction.predict_price() как опорные
     примеры для оценки цены и в финальный результат как "похожие предметы".
     """
-    raise NotImplementedError
+    return search(embedding, top_k)
