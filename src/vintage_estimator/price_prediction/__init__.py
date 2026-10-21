@@ -1,3 +1,3 @@
-from .price_prediction import predict_price
+from .price_prediction import load_category_prices, predict_price
 
-__all__ = ["predict_price"]
+__all__ = ["load_category_prices", "predict_price"]

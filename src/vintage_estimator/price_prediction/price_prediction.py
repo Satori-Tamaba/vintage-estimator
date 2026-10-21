@@ -1,4 +1,26 @@
+import pandas as pd
+
 from vintage_estimator.schemas import ClassificationResult, PricePrediction, RetrievedItem
+
+# категория -> типичная цена по датасету, заполняется load_category_prices().
+# Модуль-level состояние по той же причине, что и в retriever/index.py:
+# контракт predict_price(classification, similar_items) не предполагает
+# параметра с таблицей цен, а она общая для всех запросов.
+_category_prices: dict[str, float] = {}
+
+
+def load_category_prices(csv_path: str) -> None:
+    """Строит таблицу "категория -> медианная цена" из CSV data_pipeline.
+
+    Используется как fallback в predict_price(), когда у похожих предметов
+    из retriever нет цены. Ожидает колонки category и price (см.
+    data_pipeline/parse.py).
+    """
+    df = pd.read_csv(csv_path)
+    df = df.dropna(subset=["category", "price"])
+
+    global _category_prices
+    _category_prices = df.groupby("category")["price"].median().to_dict()
 
 
 def predict_price(
@@ -7,16 +29,14 @@ def predict_price(
 ) -> PricePrediction:
     """Оценивает цену предмета по похожим предметам из retriever.
 
-    classification пока не используется: эмбединг, по которому retriever
-    нашёл similar_items, уже неявно учитывает категорию и стиль предмета
-    (похожие по эмбедингу вещи обычно похожи и по категории). Параметр
-    зафиксирован контрактом в schemas.py и понадобится, когда появится
-    датасет с ценами по категориям — для fallback, если у similar_items
-    нет цены (см. ветку ниже).
+    Если у similar_items нет цены (пустой список или ни у кого не указана),
+    берём типичную цену по категории из _category_prices — это грубее, чем
+    оценка по похожим вещам, но честнее, чем выдуманный 0.0.
     """
     priced_items = [item for item in similar_items if item.price is not None]
     if not priced_items:
-        return PricePrediction(price=0.0)
+        price = _category_prices.get(classification.category, 0.0)
+        return PricePrediction(price=price)
 
     weights = [max(item.score, 0.0) for item in priced_items]
     total_weight = sum(weights)
