@@ -31,7 +31,7 @@ class RetrievedItemResponse(BaseModel):
 class EstimationResponse(BaseModel):
     item: str
     style: str | None
-    price: float
+    price: float | None
     similar_items: list[RetrievedItemResponse]
 
 

@@ -35,7 +35,7 @@ def predict_price(
     """
     priced_items = [item for item in similar_items if item.price is not None]
     if not priced_items:
-        price = _category_prices.get(classification.category, 0.0)
+        price = _category_prices.get(classification.category)
         return PricePrediction(price=price)
 
     weights = [max(item.score, 0.0) for item in priced_items]

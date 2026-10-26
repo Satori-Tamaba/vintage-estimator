@@ -74,3 +74,17 @@ def test_estimate_endpoint_rejects_too_large_file():
     )
 
     assert response.status_code == 413
+
+
+def test_estimate_endpoint_serializes_missing_price_as_null(monkeypatch):
+    from vintage_estimator.schemas import EstimationResult
+    from vintage_estimator.api import app as app_module
+
+    monkeypatch.setattr(app_module, "estimate", lambda image: EstimationResult(
+        item="vase", style=None, price=None,
+    ))
+    response = client.post(
+        "/estimate", files={"file": ("photo.png", _fake_image_bytes(), "image/png")},
+    )
+    assert response.status_code == 200
+    assert response.json()["price"] is None

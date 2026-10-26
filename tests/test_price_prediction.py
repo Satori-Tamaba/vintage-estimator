@@ -14,10 +14,10 @@ def reset_category_prices():
     price_prediction._category_prices = {}
 
 
-def test_predict_price_returns_zero_when_no_similar_items():
+def test_predict_price_returns_none_when_no_similar_items():
     prediction = predict_price(CLASSIFICATION, [])
 
-    assert prediction.price == 0.0
+    assert prediction.price is None
     assert prediction.price_range is None
 
 
@@ -26,7 +26,7 @@ def test_predict_price_ignores_items_without_price():
 
     prediction = predict_price(CLASSIFICATION, items)
 
-    assert prediction.price == 0.0
+    assert prediction.price is None
 
 
 def test_predict_price_weights_by_similarity_score():
@@ -66,11 +66,17 @@ def test_predict_price_falls_back_to_category_price_when_no_similar_items(tmp_pa
     assert prediction.price_range is None
 
 
-def test_predict_price_falls_back_to_zero_for_unknown_category(tmp_path):
+def test_predict_price_returns_none_for_unknown_category(tmp_path):
     csv_path = tmp_path / "catalog.csv"
     csv_path.write_text("category,price\nclock,50\n", encoding="utf-8")
     load_category_prices(str(csv_path))
 
     prediction = predict_price(CLASSIFICATION, [])  # CLASSIFICATION.category = "vase"
 
+    assert prediction.price is None
+
+
+def test_predict_price_preserves_known_zero_price():
+    prediction = predict_price(CLASSIFICATION, [RetrievedItem(item_id="free", score=1.0, price=0.0)])
     assert prediction.price == 0.0
+    assert prediction.price_range == (0.0, 0.0)

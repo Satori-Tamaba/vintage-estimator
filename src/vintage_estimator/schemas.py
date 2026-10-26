@@ -47,7 +47,7 @@ class RetrievedItem:
 class PricePrediction:
     """Выход price_prediction.predict_price()."""
 
-    price: float
+    price: float | None
     currency: str = "RUB"
     price_range: tuple[float, float] | None = None
 
@@ -58,5 +58,5 @@ class EstimationResult:
 
     item: str
     style: str | None
-    price: float
+    price: float | None
     similar_items: list[RetrievedItem] = field(default_factory=list)
