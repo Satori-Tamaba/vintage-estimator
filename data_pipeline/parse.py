@@ -13,13 +13,17 @@
     uv run python data_pipeline/parse_monetnik.py --list-sections
 
 Скрипт можно прерывать и запускать снова: уже собранные лоты берутся из CSV.
+Если сайт временно недоступен, скрипт сохраняет собранное и завершается с
+ошибкой (код 1), а не делает вид, что каталог закончился.
 """
 from __future__ import annotations
 
 import argparse
 import logging
 import re
+import sys
 import time
+from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.parse import urljoin, urlsplit
 
@@ -27,40 +31,7 @@ import pandas as pd
 import requests
 from bs4 import BeautifulSoup
 
-BASE = "https://www.monetnik.ru"
-
 ROOT = Path(__file__).resolve().parents[1]
-DATA_DIR = ROOT / "data"
-IMG_DIR = DATA_DIR / "raw_image"
-
-# короткое имя -> (путь после /antikvariat/, имя для CSV-файла, русское название)
-SECTIONS: dict[str, tuple[str, str, str]] = {
-    "kuhnya": ("kuhnya", "kitchen", "Кухонная утварь"),
-    "interier": ("interier", "interior", "Интерьер и декор"),
-    "lichnoe": ("lichnoe", "personal", "Личные вещи"),
-    "chasy": ("chasy", "clocks", "Часы"),
-    "samovary": ("samovary", "samovars", "Самовары"),
-    "tehnika": ("tehnika", "tech", "Техника"),
-    "religia": ("religia", "religion", "Религиозная атрибутика, культовые предметы и реликвии"),
-    "voennoe": ("voennoe", "military", "Военная и политическая атрибутика"),
-    "pechatnoe": ("pechatnoe", "print", "Печатная продукция, документы и фотографии"),
-    "igry": ("igry", "games", "Настольные, спортивные игры, модели и игрушки"),
-    "odejda": ("odejda", "clothing", "Одежда и экипировка"),
-}
-# русские названия и их краткие формы
-RU_ALIASES: dict[str, str] = {v[2].lower(): k for k, v in SECTIONS.items()}
-RU_ALIASES.update(
-    {
-        "кухня": "kuhnya",
-        "интерьер": "interier",
-        "интерьер и декор": "interier",
-        "религия": "religia",
-        "военное": "voennoe",
-        "печатная продукция": "pechatnoe",
-        "игры": "igry",
-        "игрушки": "igry",
-    }
-)
 
 COLUMNS = [
     "image_url",
@@ -74,90 +45,42 @@ COLUMNS = [
     "condition",
 ]
 
-HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-        "(KHTML, like Gecko) Chrome/124.0 Safari/537.36"
-    ),
-    "Accept-Language": "ru-RU,ru;q=0.9",
-}
+LATIN_TO_CYR = str.maketrans("ABCEHKMOPTXaceopxy", "АВСЕНКМОРТХасеорху")
 
-LATIN_TO_CYR = str.maketrans(
-    {
-        "A": "А", "B": "В", "C": "С", "E": "Е", "H": "Н", "K": "К", "M": "М",
-        "O": "О", "P": "Р", "T": "Т", "X": "Х", "a": "а", "c": "с", "e": "е",
-        "o": "о", "p": "р", "x": "х", "y": "у",
-    }
-)
+BASE = "https://www.monetnik.ru"
 
 log = logging.getLogger("monetnik")
 
 
-# ------------------------------------------------------------ подраздел ----
-def resolve_section(arg: str) -> tuple[str, str]:
-    """Возвращает (путь подраздела, имя для файла).
-
-    Принимает: 'interier', 'interier/vazy', 'Интерьер и декор',
-    '/antikvariat/interier/', 'https://www.monetnik.ru/antikvariat/interier/'.
-    """
-    s = arg.strip().lower()
-    s = RU_ALIASES.get(s, s)
-    if s.startswith("http"):
-        s = urlsplit(s).path
-    s = s.strip("/")
-    s = re.sub(r"^antikvariat(/|$)", "", s)
-    s = re.sub(r"/?page\.\d+$", "", s)
-    if not s:
-        raise SystemExit("Укажите подраздел, например: interier (список: --list-sections)")
-    if s in SECTIONS:
-        return SECTIONS[s][0], SECTIONS[s][1]
-    if not re.fullmatch(r"[a-z0-9\-]+(/[a-z0-9\-]+)*", s):
-        raise SystemExit(f"Не понял подраздел «{arg}». Список: --list-sections")
-    return s, s.replace("/", "_")
+class FetchError(Exception):
+    """Страницу не удалось загрузить (сеть, 5xx и т.п.), в отличие от 404."""
 
 
-def category_url(path: str, page: int = 1) -> str:
-    base = f"{BASE}/antikvariat/{path}/"
-    return base if page == 1 else f"{base}page.{page}/"
+@dataclass(frozen=True)
+class ParserConfig:
+    """Все настройки парсера в одном месте."""
+
+    data_dir: Path = ROOT / "data"
+    delay: float = 0.5
+    retries: int = 3
+    timeout: int = 30
+    max_image_bytes: int = 5 * 1024 * 1024  # 5 МБ
+    headers: dict[str, str] = field(
+        default_factory=lambda: {
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                "(KHTML, like Gecko) Chrome/124.0 Safari/537.36"
+            ),
+            "Accept-Language": "ru-RU,ru;q=0.9",
+        }
+    )
+
+    @property
+    def img_dir(self) -> Path:
+        return self.data_dir / "raw_image"
 
 
-# ----------------------------------------------------------------- сеть ----
-def fetch(session: requests.Session, url: str, retries: int = 3) -> str | None:
-    """Возвращает HTML или None, если страница не найдена / не загрузилась."""
-    for attempt in range(1, retries + 1):
-        try:
-            resp = session.get(url, timeout=30)
-            if resp.status_code == 404:
-                return None
-            resp.raise_for_status()
-            return resp.text
-        except requests.RequestException as exc:
-            log.warning("%s: попытка %d/%d не удалась: %s", url, attempt, retries, exc)
-            time.sleep(2 * attempt)
-    return None
-
-
-def download_image(session: requests.Session, image_url: str, lot_id: str) -> bool:
-    ext = Path(urlsplit(image_url).path).suffix.lower() or ".jpg"
-    target = IMG_DIR / f"{lot_id}{ext}"
-    if target.exists() and target.stat().st_size > 0:
-        return True
-    for attempt in range(1, 4):
-        try:
-            resp = session.get(image_url, timeout=30)
-            resp.raise_for_status()
-            if not resp.headers.get("Content-Type", "").startswith("image"):
-                log.warning("%s: это не картинка", image_url)
-                return False
-            target.write_bytes(resp.content)
-            return True
-        except requests.RequestException as exc:
-            log.warning("%s: попытка %d/3 не удалась: %s", image_url, attempt, exc)
-            time.sleep(2 * attempt)
-    return False
-
-
-# -------------------------------------------------------------- разбор ----
+# ------------------------------------------------------- разбор (без сети) ----
 def extract_lot_urls(html: str, section_path: str) -> list[str]:
     """Ссылки на лоты подраздела со страницы каталога (без дублей, по порядку).
 
@@ -209,7 +132,7 @@ def parse_props(soup: BeautifulSoup) -> dict[str, str]:
     props: dict[str, str] = {}
     cur: str | None = None
     for line in soup.get_text("\n", strip=True).split("\n"):
-        line = line.strip("  *•-")
+        line = line.strip("  *•-")
         if not line:
             continue
         m = _KEY_RE.match(line)
@@ -243,13 +166,13 @@ def find_main_image(soup: BeautifulSoup) -> str | None:
 def find_price(soup: BeautifulSoup) -> int | None:
     """Текущая цена из <title> («... стоимостью 8889 руб.») или og:description."""
     title = soup.title.get_text() if soup.title else ""
-    m = re.search(r"стоимостью\s+([\d\s ]+)\s*руб", title)
+    m = re.search(r"стоимостью\s+([\d\s ]+)\s*руб", title)
     if not m:
         meta = soup.find("meta", attrs={"property": "og:description"}) or soup.find(
             "meta", attrs={"name": "og:description"}
         )
         content = meta.get("content", "") if meta else ""
-        m = re.search(r"за\s+([\d\s ]+)\s*руб", content)
+        m = re.search(r"за\s+([\d\s ]+)\s*руб", content)
     return int(re.sub(r"\D", "", m.group(1))) if m else None
 
 
@@ -288,11 +211,209 @@ def parse_lot(html: str, url: str) -> dict | None:
     }
 
 
-# ----------------------------------------------------------------- main ----
 def save_csv(rows: list[dict], path: Path) -> None:
     pd.DataFrame(rows, columns=COLUMNS).to_csv(path, index=False, encoding="utf-8-sig")
 
 
+# ------------------------------------------------------------------ парсер ----
+class MonetnikParser:
+    """Сетевая часть и сборка каталога. Разбор HTML живёт в функциях выше."""
+
+    # короткое имя -> (путь после /antikvariat/, имя для CSV-файла, русское название)
+    SECTIONS: dict[str, tuple[str, str, str]] = {
+        "kuhnya": ("kuhnya", "kitchen", "Кухонная утварь"),
+        "interier": ("interier", "interior", "Интерьер и декор"),
+        "lichnoe": ("lichnoe", "personal", "Личные вещи"),
+        "chasy": ("chasy", "clocks", "Часы"),
+        "samovary": ("samovary", "samovars", "Самовары"),
+        "tehnika": ("tehnika", "tech", "Техника"),
+        "religia": ("religia", "religion", "Религиозная атрибутика, культовые предметы и реликвии"),
+        "voennoe": ("voennoe", "military", "Военная и политическая атрибутика"),
+        "pechatnoe": ("pechatnoe", "print", "Печатная продукция, документы и фотографии"),
+        "igry": ("igry", "games", "Настольные, спортивные игры, модели и игрушки"),
+        "odejda": ("odejda", "clothing", "Одежда и экипировка"),
+    }
+    # русские названия и их краткие формы
+    RU_ALIASES: dict[str, str] = {
+        **{v[2].lower(): k for k, v in SECTIONS.items()},
+        "кухня": "kuhnya",
+        "интерьер": "interier",
+        "интерьер и декор": "interier",
+        "религия": "religia",
+        "военное": "voennoe",
+        "печатная продукция": "pechatnoe",
+        "игры": "igry",
+        "игрушки": "igry",
+    }
+
+    def __init__(self, config: ParserConfig | None = None) -> None:
+        self.config = config or ParserConfig()
+        self.session = requests.Session()
+        self.session.headers.update(self.config.headers)
+
+    # ---- подраздел ----
+    @classmethod
+    def resolve_section(cls, arg: str) -> tuple[str, str]:
+        """Возвращает (путь подраздела, имя для файла).
+
+        Принимает: 'interier', 'interier/vazy', 'Интерьер и декор',
+        '/antikvariat/interier/', 'https://www.monetnik.ru/antikvariat/interier/'.
+        """
+        s = arg.strip().lower()
+        s = cls.RU_ALIASES.get(s, s)
+        if s.startswith("http"):
+            s = urlsplit(s).path
+        s = s.strip("/")
+        s = re.sub(r"^antikvariat(/|$)", "", s)
+        s = re.sub(r"/?page\.\d+$", "", s)
+        if not s:
+            raise SystemExit("Укажите подраздел, например: interier (список: --list-sections)")
+        if s in cls.SECTIONS:
+            return cls.SECTIONS[s][0], cls.SECTIONS[s][1]
+        if not re.fullmatch(r"[a-z0-9\-]+(/[a-z0-9\-]+)*", s):
+            raise SystemExit(f"Не понял подраздел «{arg}». Список: --list-sections")
+        return s, s.replace("/", "_")
+
+    @staticmethod
+    def category_url(path: str, page: int = 1) -> str:
+        base = f"{BASE}/antikvariat/{path}/"
+        return base if page == 1 else f"{base}page.{page}/"
+
+    # ---- сеть ----
+    def fetch(self, url: str) -> str | None:
+        """HTML страницы; None — только если страницы нет (404).
+
+        Если загрузить не удалось после всех попыток — поднимает FetchError.
+        """
+        cfg = self.config
+        last_exc: Exception | None = None
+        for attempt in range(1, cfg.retries + 1):
+            try:
+                resp = self.session.get(url, timeout=cfg.timeout)
+                if resp.status_code == 404:
+                    return None
+                resp.raise_for_status()
+                return resp.text
+            except requests.RequestException as exc:
+                last_exc = exc
+                log.warning("%s: попытка %d/%d не удалась: %s", url, attempt, cfg.retries, exc)
+                time.sleep(2 * attempt)
+        raise FetchError(f"{url}: не удалось загрузить после {cfg.retries} попыток") from last_exc
+
+    def download_image(self, image_url: str, lot_id: str) -> bool:
+        cfg = self.config
+        ext = Path(urlsplit(image_url).path).suffix.lower() or ".jpg"
+        target = cfg.img_dir / f"{lot_id}{ext}"
+        if target.exists() and target.stat().st_size > 0:
+            return True
+        for attempt in range(1, 4):
+            try:
+                with self.session.get(image_url, timeout=cfg.timeout, stream=True) as resp:
+                    resp.raise_for_status()
+                    if not resp.headers.get("Content-Type", "").startswith("image"):
+                        log.warning("%s: это не картинка", image_url)
+                        return False
+                    declared = int(resp.headers.get("Content-Length") or 0)
+                    if declared > cfg.max_image_bytes:
+                        log.warning("%s: файл слишком большой (%d байт)", image_url, declared)
+                        return False
+                    chunks: list[bytes] = []
+                    size = 0
+                    for chunk in resp.iter_content(chunk_size=64 * 1024):
+                        size += len(chunk)
+                        if size > cfg.max_image_bytes:
+                            log.warning("%s: файл больше %d байт, пропускаем", image_url, cfg.max_image_bytes)
+                            return False
+                        chunks.append(chunk)
+                target.write_bytes(b"".join(chunks))
+                return True
+            except requests.RequestException as exc:
+                log.warning("%s: попытка %d/3 не удалась: %s", image_url, attempt, exc)
+                time.sleep(2 * attempt)
+        return False
+
+    # ---- сборка каталога ----
+    def run(
+        self,
+        section_path: str,
+        csv_path: Path,
+        limit: int,
+        max_pages: int,
+        download_images: bool = True,
+    ) -> bool:
+        """Собирает лоты в CSV. True — каталог пройден без сетевых сбоев."""
+        cfg = self.config
+        cfg.data_dir.mkdir(parents=True, exist_ok=True)
+        cfg.img_dir.mkdir(parents=True, exist_ok=True)
+
+        rows: list[dict] = []
+        if csv_path.exists():
+            rows = pd.read_csv(csv_path).fillna("").to_dict("records")
+            log.info("Продолжаем: в CSV уже %d лотов", len(rows))
+        seen = {r["url"] for r in rows}
+        failed = 0
+
+        try:
+            for page in range(1, max_pages + 1):
+                if len(rows) >= limit:
+                    break
+                page_url = self.category_url(section_path, page)
+                html = self.fetch(page_url)
+                time.sleep(cfg.delay)
+                if html is None:
+                    log.info("Страница %d недоступна (404) — конец каталога", page)
+                    break
+                lot_urls = extract_lot_urls(html, section_path)
+                if not lot_urls:
+                    log.info("На странице %d нет лотов — конец каталога", page)
+                    break
+                log.info("Страница %d: %d лотов (собрано %d/%d)", page, len(lot_urls), len(rows), limit)
+
+                for url in lot_urls:
+                    if len(rows) >= limit:
+                        break
+                    if url in seen:
+                        continue
+                    try:
+                        lot_html = self.fetch(url)
+                    except FetchError as exc:
+                        # не помечаем как просмотренный: при перезапуске лот будет собран
+                        log.warning("Лот пропущен из-за сбоя сети: %s", exc)
+                        failed += 1
+                        continue
+                    time.sleep(cfg.delay)
+                    seen.add(url)
+                    if lot_html is None:
+                        continue
+                    item = parse_lot(lot_html, url)
+                    if item is None:
+                        log.info("Нет фото, пропускаем: %s", url)
+                        continue
+                    if download_images and not self.download_image(item["image_url"], lot_id_from_url(url)):
+                        log.info("Фото не скачалось, пропускаем: %s", url)
+                        continue
+                    rows.append(item)
+                    if len(rows) % 25 == 0:
+                        save_csv(rows, csv_path)
+        except FetchError as exc:
+            save_csv(rows, csv_path)
+            log.error("Остановились из-за сбоя сети, каталог НЕ дочитан: %s", exc)
+            log.error("Сохранено %d лотов -> %s. Запустите скрипт снова, чтобы продолжить.", len(rows), csv_path)
+            return False
+
+        save_csv(rows, csv_path)
+        if failed:
+            log.warning(
+                "Готово с пропусками: %d лотов -> %s; %d лотов не загрузились, "
+                "запустите скрипт ещё раз, чтобы добрать их",
+                len(rows), csv_path, failed,
+            )
+            return False
+        log.info("Готово: %d лотов -> %s", len(rows), csv_path)
+        return True
+
+
+# ----------------------------------------------------------------- main ----
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawTextHelpFormatter)
     ap.add_argument("section", nargs="?", help="подраздел: interier, kuhnya, «интерьер и декор», interier/vazy, ссылка")
@@ -305,68 +426,28 @@ def main() -> None:
     args = ap.parse_args()
 
     if args.list_sections:
-        for key, (_, out_name, ru) in SECTIONS.items():
+        for key, (_, out_name, ru) in MonetnikParser.SECTIONS.items():
             print(f"{key:10} -> monetnik_{out_name}.csv   {ru}")
         print("\nЛюбой вложенный подраздел тоже подойдёт: interier/vazy, kuhnya/posuda ...")
         return
     if not args.section:
         ap.error("укажите подраздел, например: interier")
 
-    section_path, out_name = resolve_section(args.section)
-    csv_path = args.out or DATA_DIR / f"monetnik_{out_name}.csv"
-
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
-    IMG_DIR.mkdir(parents=True, exist_ok=True)
+    parser = MonetnikParser(ParserConfig(delay=args.delay))
+    section_path, out_name = parser.resolve_section(args.section)
+    csv_path = args.out or parser.config.data_dir / f"monetnik_{out_name}.csv"
     log.info("Подраздел: /antikvariat/%s/  ->  %s", section_path, csv_path)
 
-    rows: list[dict] = []
-    if csv_path.exists():
-        rows = pd.read_csv(csv_path).fillna("").to_dict("records")
-        log.info("Продолжаем: в CSV уже %d лотов", len(rows))
-    seen = {r["url"] for r in rows}
-
-    session = requests.Session()
-    session.headers.update(HEADERS)
-
-    for page in range(1, args.max_pages + 1):
-        if len(rows) >= args.limit:
-            break
-        page_url = category_url(section_path, page)
-        html = fetch(session, page_url)
-        time.sleep(args.delay)
-        if html is None:
-            log.info("Страница %d недоступна — конец каталога", page)
-            break
-        lot_urls = extract_lot_urls(html, section_path)
-        if not lot_urls:
-            log.info("На странице %d нет лотов — конец каталога", page)
-            break
-        log.info("Страница %d: %d лотов (собрано %d/%d)", page, len(lot_urls), len(rows), args.limit)
-
-        for url in lot_urls:
-            if len(rows) >= args.limit:
-                break
-            if url in seen:
-                continue
-            seen.add(url)
-            lot_html = fetch(session, url)
-            time.sleep(args.delay)
-            if lot_html is None:
-                continue
-            item = parse_lot(lot_html, url)
-            if item is None:
-                log.info("Нет фото, пропускаем: %s", url)
-                continue
-            if not args.no_images and not download_image(session, item["image_url"], lot_id_from_url(url)):
-                log.info("Фото не скачалось, пропускаем: %s", url)
-                continue
-            rows.append(item)
-            if len(rows) % 25 == 0:
-                save_csv(rows, csv_path)
-
-    save_csv(rows, csv_path)
-    log.info("Готово: %d лотов -> %s", len(rows), csv_path)
+    ok = parser.run(
+        section_path,
+        csv_path,
+        limit=args.limit,
+        max_pages=args.max_pages,
+        download_images=not args.no_images,
+    )
+    if not ok:
+        sys.exit(1)
 
 
 if __name__ == "__main__":
