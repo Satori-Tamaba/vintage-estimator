@@ -1,20 +1,4 @@
-"""In-memory векторный индекс над каталогом предметов (FAISS, косинусное сходство).
-
-Пока нет готового датасета с реальными эмбедингами (Денис ещё не отдал
-encoder, data_pipeline/ только собирает фото и цены — без эмбедингов),
-индекс строится через load_catalog() вручную, в т.ч. из тестов. Как
-только появится CSV с эмбедингами — загрузка каталога подключится сюда
-без изменений в retriever.retrieve().
-
-Индекс и список items хранятся в module-level переменных, а не передаются
-параметром — это осознанное нарушение правила "без глобального состояния"
-из CONTRIBUTING.md: контракт retrieve(embedding, top_k) в schemas.py/pipeline.py
-не предполагает параметра с каталогом, а строить FAISS-индекс заново на
-каждый запрос слишком дорого. Если каталог понадобится переключать в
-рантайме (например, разные категории в разных индексах) — это повод
-завести класс Retriever с явным состоянием, а не продолжать расширять
-глобальные переменные.
-"""
+"""???????????????? FAISS-?????? ???????? ? ?????????? ?????????."""
 
 import faiss
 import numpy as np
@@ -31,10 +15,14 @@ def load_catalog(embeddings: np.ndarray, items: list[RetrievedItem]) -> None:
     Векторы нормализуются, поэтому inner product в FAISS даёт косинусное
     сходство — его же возвращает search() как RetrievedItem.score.
     """
+    if embeddings.ndim != 2 or embeddings.shape[1] == 0:
+        raise ValueError("????????? ??????? ?????????? NxD, D > 0")
+    if not np.isfinite(embeddings).all():
+        raise ValueError("????????? ?????? ???? ?????????")
     if embeddings.shape[0] != len(items):
         raise ValueError("число эмбедингов не совпадает с числом предметов")
 
-    normalized = np.ascontiguousarray(embeddings, dtype=np.float32)
+    normalized = np.array(embeddings, dtype=np.float32, order="C", copy=True)
     faiss.normalize_L2(normalized)
 
     index = faiss.IndexFlatIP(normalized.shape[1])
@@ -51,10 +39,16 @@ def search(query: Embedding, top_k: int) -> list[RetrievedItem]:
     Пустой каталог — это не ошибка, а "похожих предметов пока нет":
     retriever.retrieve() должен уметь работать до того, как каталог загружен.
     """
+    if top_k < 1:
+        raise ValueError("top_k ?????? ???? ?????????????")
     if _index is None or _index.ntotal == 0:
         return []
 
-    q = np.ascontiguousarray(query, dtype=np.float32).reshape(1, -1)
+    if query.ndim != 1 or query.shape[0] != _index.d:
+        raise ValueError(f"????????? ?????? ??????????? {_index.d}")
+    if not np.isfinite(query).all():
+        raise ValueError("?????? ?????? ????????? ???????? ????????")
+    q = np.array(query, dtype=np.float32, order="C", copy=True).reshape(1, -1)
     faiss.normalize_L2(q)
 
     k = min(top_k, _index.ntotal)
