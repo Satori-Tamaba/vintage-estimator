@@ -9,7 +9,7 @@ import io
 
 import numpy as np
 from fastapi import FastAPI, File, HTTPException, UploadFile
-from PIL import Image as PILImage
+from PIL import Image as PILImage, UnidentifiedImageError
 from pydantic import BaseModel
 
 from vintage_estimator.api.pipeline import estimate
@@ -43,7 +43,7 @@ async def estimate_endpoint(file: UploadFile = File(...)) -> EstimationResponse:
             detail=f"неподдерживаемый тип файла: {file.content_type}",
         )
 
-    data = await file.read()
+    data = await file.read(MAX_IMAGE_SIZE_BYTES + 1)
     if len(data) > MAX_IMAGE_SIZE_BYTES:
         raise HTTPException(
             status_code=413,
@@ -51,8 +51,9 @@ async def estimate_endpoint(file: UploadFile = File(...)) -> EstimationResponse:
         )
 
     try:
-        image = np.array(PILImage.open(io.BytesIO(data)))
-    except Exception as exc:
+        with PILImage.open(io.BytesIO(data)) as uploaded:
+            image = np.array(uploaded.convert("RGB"))
+    except (UnidentifiedImageError, OSError, ValueError, PILImage.DecompressionBombError) as exc:
         raise HTTPException(status_code=400, detail=f"не удалось прочитать изображение: {exc}") from exc
 
     result = estimate(image)

@@ -88,3 +88,36 @@ def test_estimate_endpoint_serializes_missing_price_as_null(monkeypatch):
     )
     assert response.status_code == 200
     assert response.json()["price"] is None
+
+
+def test_endpoint_reads_at_most_limit_plus_one_byte():
+    import asyncio
+    from unittest.mock import AsyncMock
+
+    import pytest
+    from fastapi import HTTPException, UploadFile
+    from starlette.datastructures import Headers
+    from vintage_estimator.api.app import MAX_IMAGE_SIZE_BYTES, estimate_endpoint
+
+    upload = UploadFile(
+        filename="huge.png", file=io.BytesIO(),
+        headers=Headers({"content-type": "image/png"}),
+    )
+    upload.read = AsyncMock(return_value=b"0" * (MAX_IMAGE_SIZE_BYTES + 1))
+    with pytest.raises(HTTPException) as error:
+        asyncio.run(estimate_endpoint(upload))
+    assert error.value.status_code == 413
+    upload.read.assert_awaited_once_with(MAX_IMAGE_SIZE_BYTES + 1)
+
+
+def test_endpoint_accepts_image_at_exact_size_limit(monkeypatch):
+    from vintage_estimator.api import app as app_module
+    from vintage_estimator.schemas import EstimationResult
+
+    data = _fake_image_bytes()
+    monkeypatch.setattr(app_module, "MAX_IMAGE_SIZE_BYTES", len(data))
+    monkeypatch.setattr(app_module, "estimate", lambda image: EstimationResult(
+        item="vase", style=None, price=None,
+    ))
+    response = client.post("/estimate", files={"file": ("photo.png", data, "image/png")})
+    assert response.status_code == 200
