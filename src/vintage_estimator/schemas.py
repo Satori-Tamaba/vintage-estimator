@@ -45,7 +45,7 @@ class RetrievedItem:
 
 @dataclass
 class PricePrediction:
-    """Выход price_prediction.predict_price()."""
+    """Выход predict_price(); price=None означает отсутствие данных для оценки."""
 
     price: float | None
     currency: str = "RUB"

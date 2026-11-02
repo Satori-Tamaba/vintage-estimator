@@ -14,13 +14,15 @@ def load_category_prices(csv_path: str) -> None:
 
     Используется как fallback в predict_price(), когда у похожих предметов
     из retriever нет цены. Ожидает колонки category и price (см.
-    data_pipeline/parse.py).
+    data_pipeline/parse.py). Для готового каталога используем canon_category:
+    эти же названия возвращает classifier, в отличие от сырых меток category.
     """
     df = pd.read_csv(csv_path)
-    df = df.dropna(subset=["category", "price"])
+    category_column = "canon_category" if "canon_category" in df.columns else "category"
+    df = df.dropna(subset=[category_column, "price"])
 
     global _category_prices
-    _category_prices = df.groupby("category")["price"].median().to_dict()
+    _category_prices = df.groupby(category_column)["price"].median().to_dict()
 
 
 def predict_price(
@@ -31,7 +33,7 @@ def predict_price(
 
     Если у similar_items нет цены (пустой список или ни у кого не указана),
     берём типичную цену по категории из _category_prices — это грубее, чем
-    оценка по похожим вещам, но честнее, чем выдуманный 0.0.
+    оценка по похожим вещам. Если нет и цены категории, возвращаем None.
     """
     priced_items = [item for item in similar_items if item.price is not None]
     if not priced_items:

@@ -6,6 +6,9 @@
 """
 
 import io
+import os
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 
 import numpy as np
 from fastapi import FastAPI, File, HTTPException, UploadFile
@@ -14,7 +17,18 @@ from pydantic import BaseModel
 
 from vintage_estimator.api.pipeline import estimate
 
-app = FastAPI(title="vintage-estimator")
+
+@asynccontextmanager
+async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+    data_dir = os.environ.get("VINTAGE_CATALOG_DIR")
+    if data_dir:
+        from vintage_estimator.api.runtime import initialize_catalog
+
+        initialize_catalog(data_dir)
+    yield
+
+
+app = FastAPI(title="vintage-estimator", lifespan=lifespan)
 
 ALLOWED_CONTENT_TYPES = {"image/jpeg", "image/png", "image/webp"}
 MAX_IMAGE_SIZE_BYTES = 10 * 1024 * 1024
