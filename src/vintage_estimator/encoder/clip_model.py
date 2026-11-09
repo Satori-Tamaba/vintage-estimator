@@ -37,18 +37,23 @@ _device: str | None = None
 
 
 def get_model() -> tuple["open_clip.model.CLIP", object, str]:
-    """Возвращает (model, tokenizer, device). Модель в eval, без градиентов."""
+    """Возвращает (model, tokenizer, device). Модель в eval, на нужном device."""
     global _model, _tokenizer, _device
     if _model is None:
         with _lock:
-            if _model is None:  # двойная проверка: другой поток мог успеть
+            if _model is None:
+                device = "cuda" if torch.cuda.is_available() else "cpu"
                 model, _preprocess, _ = open_clip.create_model_and_transforms(
-                    MODEL_NAME, pretrained=PRETRAINED
+                    MODEL_NAME,
+                    pretrained=PRETRAINED,
+
+                    force_quick_gelu=True,
+                    device=device, 
                 )
                 model.eval()
-                _model = model
                 _tokenizer = open_clip.get_tokenizer(MODEL_NAME)
-                _device = "cuda" if torch.cuda.is_available() else "cpu"
+                _device = device
+                _model = model
     return _model, _tokenizer, _device
 
 
