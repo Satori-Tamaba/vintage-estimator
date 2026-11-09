@@ -1,9 +1,27 @@
+from pathlib import Path
+from typing import BinaryIO
+
 import numpy as np
 from PIL import Image as PILImage
+from PIL import ImageOps
 
 from vintage_estimator.schemas import Image, ProcessedImage
 
 TARGET_SIZE = 224
+
+
+def load_image(source: str | Path | BinaryIO) -> Image:
+    """Читает файл (путь или file-like) в HxWx3 uint8 RGB.
+
+    Единая точка входа для CLI и data_pipeline: учитывает EXIF-поворот
+    (фото с телефона) и приводит любой режим PIL (P, L, LA, RGBA, CMYK...)
+    к RGB. Без этого np.asarray(PIL.Image) для палитровых картинок отдаёт
+    2D-индексы палитры, и цвета теряются.
+    """
+    with PILImage.open(source) as opened:
+        oriented = ImageOps.exif_transpose(opened)
+        return np.asarray(oriented.convert("RGB"), dtype=np.uint8)
+
 
 def preprocess(image: Image) -> ProcessedImage:
     """Приводит сырую картинку пользователя к виду, который ждёт encoder.encode().
@@ -18,8 +36,8 @@ def preprocess(image: Image) -> ProcessedImage:
     pil = _to_pil(image)
 
     # RGB-конверсия до ресайза: покрывает L/LA/P/RGBA за один шаг.
-    # Прозрачность при этом теряется (фон становится чёрным) — прозрачные
-    # фоны на фото антиквариата случаются редко, считать это фичей не стали.
+    # Альфа-канал при этом просто отбрасывается: прозрачные пиксели
+    # сохраняют свой исходный RGB-цвет (это не обязательно чёрный).
     if pil.mode != "RGB":
         pil = pil.convert("RGB")
 
@@ -27,8 +45,33 @@ def preprocess(image: Image) -> ProcessedImage:
     return np.asarray(resized, dtype=np.uint8)
 
 
+def _to_uint8(arr: np.ndarray) -> np.ndarray:
+    """Приводит массив любого числового dtype к uint8 в диапазоне 0..255.
+
+    - uint8 — без изменений;
+    - uint16 — масштабируется (65535 -> 255), а не обрезается по модулю;
+    - float — если все значения в 0..1, считаем это нормированной картинкой
+      и умножаем на 255, иначе считаем, что значения уже в 0..255;
+    - прочие целые и bool — зажимаются в 0..255.
+    """
+    if arr.dtype == np.uint8:
+        return arr
+    if arr.dtype == np.bool_:
+        return arr.astype(np.uint8) * 255
+    if arr.dtype == np.uint16:
+        return (arr.astype(np.float32) / 257.0).round().astype(np.uint8)
+    if arr.dtype.kind == "f":
+        values = np.nan_to_num(arr.astype(np.float64), nan=0.0, posinf=255.0, neginf=0.0)
+        if values.size and values.min() >= 0.0 and values.max() <= 1.0:
+            values = values * 255.0
+        return np.clip(values.round(), 0, 255).astype(np.uint8)
+    if arr.dtype.kind in "iu":
+        return np.clip(arr, 0, 255).astype(np.uint8)
+    raise ValueError(f"неподдерживаемый dtype картинки: {arr.dtype}")
+
+
 def _to_pil(image: Image) -> PILImage.Image:
-    """Оформляет ndarray как PIL-картинку; несовместимые dtype приводит к uint8."""
+    """Оформляет ndarray как PIL-картинку; любой dtype предварительно приводит к uint8."""
     arr = np.asarray(image)
 
     if arr.ndim == 3 and arr.shape[2] == 1:
@@ -41,10 +84,4 @@ def _to_pil(image: Image) -> PILImage.Image:
     if arr.size == 0:
         raise ValueError("картинка пустая")
 
-    try:
-        return PILImage.fromarray(arr)
-    except TypeError:
-        # fromarray берёт не все dtype (например, float64). Считаем, что
-        # значения лежат в 0..255, и просто приводим тип — потеря точности
-        uint8 = arr.astype(np.uint8) if arr.dtype.kind != "f" else np.clip(arr, 0, 255).astype(np.uint8)
-        return PILImage.fromarray(uint8)
+    return PILImage.fromarray(_to_uint8(arr))
