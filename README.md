@@ -45,6 +45,12 @@ python data_pipeline/build_embeddings.py
 python -m vintage_estimator photo.jpg --catalog-dir data --top-k 5
 ```
 
+Для обработки результата скриптом добавьте `--json`: stdout будет содержать
+JSON с категорией, стилем, ценой и аналогами. Отсутствующая цена передаётся
+как `null`, известная нулевая — как `0`. Без флага сохраняется обычный вывод.
+CLI приводит фото к RGB. Ошибки чтения фото и загрузки каталога выводятся
+в stderr с кодом завершения 1; неверные аргументы — с кодом 2.
+
 Формат каталога: `embeddings.npz` с ключом `embeddings` (N×512) и
 `embeddings_metadata.csv` с N строками в том же порядке. Обязательные поля:
 `lot_id`, `price`; для резервной оценки — `canon_category` (или `category`
