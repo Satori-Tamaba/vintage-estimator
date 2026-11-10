@@ -7,11 +7,13 @@
 
 import io
 import os
+from typing import Annotated
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
 import numpy as np
-from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi import FastAPI, File, HTTPException, Query, UploadFile
+from starlette.concurrency import run_in_threadpool
 from PIL import Image as PILImage, UnidentifiedImageError
 from pydantic import BaseModel
 
@@ -50,7 +52,10 @@ class EstimationResponse(BaseModel):
 
 
 @app.post("/estimate", response_model=EstimationResponse)
-async def estimate_endpoint(file: UploadFile = File(...)) -> EstimationResponse:
+async def estimate_endpoint(
+    file: UploadFile = File(...),
+    top_k: Annotated[int, Query(ge=1, le=100)] = 5,
+) -> EstimationResponse:
     if file.content_type not in ALLOWED_CONTENT_TYPES:
         raise HTTPException(
             status_code=415,
@@ -70,7 +75,7 @@ async def estimate_endpoint(file: UploadFile = File(...)) -> EstimationResponse:
     except (UnidentifiedImageError, OSError, ValueError, PILImage.DecompressionBombError) as exc:
         raise HTTPException(status_code=400, detail=f"не удалось прочитать изображение: {exc}") from exc
 
-    result = estimate(image)
+    result = await run_in_threadpool(estimate, image, top_k=top_k)
 
     return EstimationResponse(
         item=result.item,

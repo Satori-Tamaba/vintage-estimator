@@ -7,6 +7,7 @@
 import io
 
 import numpy as np
+import pytest
 from fastapi.testclient import TestClient
 from PIL import Image as PILImage
 
@@ -15,6 +16,39 @@ from vintage_estimator.api.app import app
 from vintage_estimator.schemas import ClassificationResult, PricePrediction, RetrievedItem
 
 client = TestClient(app)
+
+
+@pytest.mark.parametrize("top_k", [0, -1, 101, "abc"])
+def test_endpoint_rejects_invalid_top_k(top_k):
+    response = client.post(
+        f"/estimate?top_k={top_k}",
+        files={"file": ("photo.png", _fake_image_bytes(), "image/png")},
+    )
+    assert response.status_code == 422
+
+
+def test_endpoint_runs_estimate_outside_event_loop(monkeypatch):
+    import asyncio
+    import threading
+    from fastapi import UploadFile
+    from starlette.datastructures import Headers
+    from vintage_estimator.api import app as app_module
+    from vintage_estimator.schemas import EstimationResult
+
+    calls = []
+
+    def estimate(image, top_k):
+        calls.append((threading.get_ident(), top_k))
+        return EstimationResult(item="vase", style=None, price=None)
+
+    monkeypatch.setattr(app_module, "estimate", estimate)
+    upload = UploadFile(
+        file=io.BytesIO(_fake_image_bytes()),
+        headers=Headers({"content-type": "image/png"}),
+    )
+    asyncio.run(app_module.estimate_endpoint(upload, top_k=12))
+    assert calls[0][0] != threading.get_ident()
+    assert calls[0][1] == 12
 
 
 def _fake_image_bytes() -> bytes:
@@ -80,7 +114,7 @@ def test_estimate_endpoint_serializes_missing_price_as_null(monkeypatch):
     from vintage_estimator.schemas import EstimationResult
     from vintage_estimator.api import app as app_module
 
-    monkeypatch.setattr(app_module, "estimate", lambda image: EstimationResult(
+    monkeypatch.setattr(app_module, "estimate", lambda image, top_k=5: EstimationResult(
         item="vase", style=None, price=None,
     ))
     response = client.post(
@@ -116,7 +150,7 @@ def test_endpoint_accepts_image_at_exact_size_limit(monkeypatch):
 
     data = _fake_image_bytes()
     monkeypatch.setattr(app_module, "MAX_IMAGE_SIZE_BYTES", len(data))
-    monkeypatch.setattr(app_module, "estimate", lambda image: EstimationResult(
+    monkeypatch.setattr(app_module, "estimate", lambda image, top_k=5: EstimationResult(
         item="vase", style=None, price=None,
     ))
     response = client.post("/estimate", files={"file": ("photo.png", data, "image/png")})
